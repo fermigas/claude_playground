@@ -1,0 +1,437 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Synth Aurora</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { width: 100%; height: 100%; overflow: hidden; background: #020408; }
+  canvas { display: block; cursor: crosshair; }
+  #label {
+    position: fixed; bottom: 16px; right: 20px;
+    font-family: 'Courier New', monospace; font-size: 11px;
+    color: rgba(100, 180, 140, 0.35); letter-spacing: 1.5px;
+    pointer-events: none; user-select: none;
+  }
+  #hint {
+    position: fixed; top: 20px; left: 50%; transform: translateX(-50%);
+    font-family: 'Courier New', monospace; font-size: 12px;
+    color: rgba(100, 200, 160, 0.5); letter-spacing: 1px;
+    pointer-events: none; user-select: none;
+    transition: opacity 3s;
+  }
+  #info {
+    position: fixed; bottom: 16px; left: 20px;
+    font-family: 'Courier New', monospace; font-size: 11px;
+    color: rgba(100, 180, 140, 0.3); letter-spacing: 1px;
+    pointer-events: none; user-select: none;
+  }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="hint">click to begin &mdash; move to shape the aurora &mdash; click to add harmonics &mdash; [space] clear</div>
+<div id="info"></div>
+<div id="label">claude_playground &mdash; synth aurora</div>
+<script>
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
+const hint = document.getElementById('hint');
+const info = document.getElementById('info');
+
+let W, H;
+function resize() {
+  W = canvas.width = window.innerWidth;
+  H = canvas.height = window.innerHeight;
+}
+resize();
+window.addEventListener('resize', resize);
+
+// --- Audio setup (deferred until first click) ---
+let audioCtx = null;
+let analyser = null;
+let masterGain = null;
+let freqData = null;
+const voices = [];
+const MAX_VOICES = 8;
+
+const WAVEFORMS = ['sine', 'triangle', 'sawtooth', 'square'];
+const NOTE_FREQS = [
+  65.41, 73.42, 82.41, 87.31, 98.00, 110.00, 123.47, // C2-B2
+  130.81, 146.83, 164.81, 174.61, 196.00, 220.00, 246.94, // C3-B3
+  261.63, 293.66, 329.63, 349.23, 392.00, 440.00, 493.88, // C4-B4
+];
+
+// Pentatonic scale degrees for harmonious sounds
+const PENTATONIC = [0, 2, 4, 7, 9, 12, 14, 16, 19, 21];
+
+function initAudio() {
+  if (audioCtx) return;
+  audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  analyser = audioCtx.createAnalyser();
+  analyser.fftSize = 512;
+  analyser.smoothingTimeConstant = 0.85;
+  masterGain = audioCtx.createGain();
+  masterGain.gain.value = 0.15;
+  masterGain.connect(analyser);
+  analyser.connect(audioCtx.destination);
+  freqData = new Uint8Array(analyser.frequencyBinCount);
+}
+
+function addVoice(x, y) {
+  initAudio();
+
+  // Map position to pentatonic note
+  const noteIdx = Math.floor((x / W) * PENTATONIC.length);
+  const penIdx = PENTATONIC[Math.min(noteIdx, PENTATONIC.length - 1)];
+  const freq = NOTE_FREQS[Math.min(penIdx, NOTE_FREQS.length - 1)];
+
+  // Map Y to waveform
+  const waveIdx = Math.floor((y / H) * WAVEFORMS.length);
+  const waveform = WAVEFORMS[Math.min(waveIdx, WAVEFORMS.length - 1)];
+
+  // Remove oldest voice if at limit
+  if (voices.length >= MAX_VOICES) {
+    const old = voices.shift();
+    fadeOutVoice(old);
+  }
+
+  const osc = audioCtx.createOscillator();
+  const gain = audioCtx.createGain();
+  const panner = audioCtx.createStereoPanner();
+
+  osc.type = waveform;
+  osc.frequency.value = freq;
+  gain.gain.value = 0;
+  panner.pan.value = (x / W) * 2 - 1;
+
+  // Add subtle vibrato
+  const lfo = audioCtx.createOscillator();
+  const lfoGain = audioCtx.createGain();
+  lfo.frequency.value = 2 + Math.random() * 4;
+  lfoGain.gain.value = freq * 0.008;
+  lfo.connect(lfoGain);
+  lfoGain.connect(osc.frequency);
+  lfo.start();
+
+  osc.connect(gain);
+  gain.connect(panner);
+  panner.connect(masterGain);
+  osc.start();
+
+  // Fade in
+  gain.gain.setTargetAtTime(0.12, audioCtx.currentTime, 0.3);
+
+  const voice = {
+    osc, gain, panner, lfo, lfoGain,
+    freq, waveform,
+    x, y,
+    birth: performance.now(),
+    hue: (x / W) * 120 + 100, // green-cyan-blue range
+    alive: true
+  };
+  voices.push(voice);
+  return voice;
+}
+
+function fadeOutVoice(voice) {
+  if (!voice.alive) return;
+  voice.alive = false;
+  const now = audioCtx.currentTime;
+  voice.gain.gain.setTargetAtTime(0, now, 0.5);
+  setTimeout(() => {
+    voice.osc.stop();
+    voice.lfo.stop();
+    voice.osc.disconnect();
+    voice.lfo.disconnect();
+  }, 3000);
+}
+
+function clearVoices() {
+  while (voices.length) {
+    fadeOutVoice(voices.pop());
+  }
+}
+
+// --- Mouse state ---
+let mouse = { x: W / 2, y: H / 2 };
+let started = false;
+
+canvas.addEventListener('mousemove', e => {
+  mouse.x = e.clientX;
+  mouse.y = e.clientY;
+
+  // Modulate existing voices based on mouse position
+  if (audioCtx) {
+    voices.forEach((v, i) => {
+      if (!v.alive) return;
+      // Subtle frequency modulation from mouse Y
+      const detune = ((mouse.y / H) - 0.5) * 50;
+      v.osc.detune.setTargetAtTime(detune, audioCtx.currentTime, 0.1);
+      // Pan follows mouse X slightly
+      const panShift = ((mouse.x / W) - 0.5) * 0.3;
+      v.panner.pan.setTargetAtTime(
+        Math.max(-1, Math.min(1, v.x / W * 2 - 1 + panShift)),
+        audioCtx.currentTime, 0.1
+      );
+    });
+  }
+});
+
+canvas.addEventListener('click', e => {
+  if (!started) {
+    started = true;
+    hint.style.opacity = '0';
+  }
+  addVoice(e.clientX, e.clientY);
+});
+
+canvas.addEventListener('touchstart', e => {
+  e.preventDefault();
+  if (!started) {
+    started = true;
+    hint.style.opacity = '0';
+  }
+  const t = e.touches[0];
+  mouse.x = t.clientX;
+  mouse.y = t.clientY;
+  addVoice(t.clientX, t.clientY);
+}, { passive: false });
+
+canvas.addEventListener('touchmove', e => {
+  e.preventDefault();
+  const t = e.touches[0];
+  mouse.x = t.clientX;
+  mouse.y = t.clientY;
+}, { passive: false });
+
+window.addEventListener('keydown', e => {
+  if (e.code === 'Space') {
+    e.preventDefault();
+    clearVoices();
+  }
+});
+
+// --- Aurora rendering ---
+const NUM_CURTAINS = 5;
+const curtains = [];
+
+for (let i = 0; i < NUM_CURTAINS; i++) {
+  curtains.push({
+    baseY: 0.15 + (i * 0.08),
+    amplitude: 30 + i * 15,
+    wavelength: 200 + i * 80,
+    speed: 0.0003 + i * 0.0001,
+    phase: Math.random() * Math.PI * 2,
+    hueBase: 120 + i * 25, // green through blue
+    opacity: 0.12 - i * 0.015,
+    heightScale: 0.25 + i * 0.05,
+  });
+}
+
+// Stars
+const stars = [];
+for (let i = 0; i < 200; i++) {
+  stars.push({
+    x: Math.random(),
+    y: Math.random(),
+    size: Math.random() * 1.5 + 0.3,
+    twinkleSpeed: Math.random() * 0.003 + 0.001,
+    twinklePhase: Math.random() * Math.PI * 2,
+  });
+}
+
+function drawStars(t) {
+  stars.forEach(s => {
+    const alpha = 0.3 + 0.4 * Math.sin(t * s.twinkleSpeed + s.twinklePhase);
+    ctx.fillStyle = `rgba(200, 220, 255, ${alpha})`;
+    ctx.beginPath();
+    ctx.arc(s.x * W, s.y * H, s.size, 0, Math.PI * 2);
+    ctx.fill();
+  });
+}
+
+function drawAurora(t) {
+  // Get audio data if available
+  let audioEnergy = 0;
+  let bassEnergy = 0;
+  let midEnergy = 0;
+  let highEnergy = 0;
+
+  if (analyser && freqData) {
+    analyser.getByteFrequencyData(freqData);
+    const len = freqData.length;
+    const bassEnd = Math.floor(len * 0.1);
+    const midEnd = Math.floor(len * 0.4);
+
+    for (let i = 0; i < len; i++) {
+      const val = freqData[i] / 255;
+      audioEnergy += val;
+      if (i < bassEnd) bassEnergy += val;
+      else if (i < midEnd) midEnergy += val;
+      else highEnergy += val;
+    }
+
+    audioEnergy /= len;
+    bassEnergy /= bassEnd;
+    midEnergy /= (midEnd - bassEnd);
+    highEnergy /= (len - midEnd);
+  }
+
+  // Mouse influence
+  const mx = mouse.x / W;
+  const my = mouse.y / H;
+
+  curtains.forEach((c, ci) => {
+    const points = [];
+    const segments = 120;
+
+    // Audio reactivity per curtain band
+    const energy = ci < 2 ? bassEnergy : ci < 4 ? midEnergy : highEnergy;
+    const audioBoost = 1 + energy * 3;
+
+    for (let i = 0; i <= segments; i++) {
+      const frac = i / segments;
+      const x = frac * W;
+
+      // Multiple wave components
+      const wave1 = Math.sin(frac * Math.PI * 2 * (W / c.wavelength) + t * c.speed * 1000 + c.phase);
+      const wave2 = Math.sin(frac * Math.PI * 3.7 * (W / c.wavelength) * 0.5 + t * c.speed * 700 + c.phase * 1.3) * 0.4;
+      const wave3 = Math.sin(frac * Math.PI * 7.1 * (W / c.wavelength) * 0.3 + t * c.speed * 500) * 0.2;
+
+      // Mouse repulsion/attraction
+      const dx = frac - mx;
+      const mouseDist = Math.abs(dx);
+      const mouseEffect = Math.exp(-mouseDist * mouseDist * 8) * (my - 0.5) * 80;
+
+      const y = c.baseY * H + (wave1 + wave2 + wave3) * c.amplitude * audioBoost + mouseEffect;
+
+      points.push({ x, y });
+    }
+
+    // Draw the curtain as a gradient band
+    for (let i = 0; i < points.length - 1; i++) {
+      const p = points[i];
+      const pn = points[i + 1];
+      const frac = i / points.length;
+
+      // Height varies with audio
+      const curtainHeight = c.heightScale * H * (0.5 + audioBoost * 0.5);
+
+      // Color shifts with position and audio
+      const hue = c.hueBase + frac * 40 + energy * 60 + Math.sin(t * 0.0005 + frac * 3) * 20;
+      const sat = 60 + energy * 30;
+      const light = 40 + energy * 30;
+
+      const grad = ctx.createLinearGradient(p.x, p.y, p.x, p.y + curtainHeight);
+      grad.addColorStop(0, `hsla(${hue}, ${sat}%, ${light}%, ${c.opacity * audioBoost * 1.5})`);
+      grad.addColorStop(0.15, `hsla(${hue + 15}, ${sat}%, ${light - 5}%, ${c.opacity * audioBoost})`);
+      grad.addColorStop(0.4, `hsla(${hue + 30}, ${sat - 10}%, ${light - 10}%, ${c.opacity * audioBoost * 0.5})`);
+      grad.addColorStop(1, `hsla(${hue + 40}, ${sat - 20}%, ${light - 20}%, 0)`);
+
+      ctx.fillStyle = grad;
+      ctx.beginPath();
+      ctx.moveTo(p.x, p.y);
+      ctx.lineTo(pn.x, pn.y);
+      ctx.lineTo(pn.x, pn.y + curtainHeight);
+      ctx.lineTo(p.x, p.y + curtainHeight);
+      ctx.closePath();
+      ctx.fill();
+    }
+
+    // Bright edge along the top of the curtain
+    ctx.beginPath();
+    ctx.moveTo(points[0].x, points[0].y);
+    for (let i = 1; i < points.length; i++) {
+      ctx.lineTo(points[i].x, points[i].y);
+    }
+    const edgeHue = c.hueBase + energy * 40;
+    ctx.strokeStyle = `hsla(${edgeHue}, 80%, 70%, ${0.15 + energy * 0.5})`;
+    ctx.lineWidth = 1.5 + energy * 2;
+    ctx.shadowColor = `hsla(${edgeHue}, 90%, 60%, ${0.3 + energy * 0.4})`;
+    ctx.shadowBlur = 10 + energy * 20;
+    ctx.stroke();
+    ctx.shadowBlur = 0;
+  });
+}
+
+// Ground reflection
+function drawReflection(t) {
+  const groundY = H * 0.85;
+  const grad = ctx.createLinearGradient(0, groundY, 0, H);
+  grad.addColorStop(0, 'rgba(2, 4, 8, 0.95)');
+  grad.addColorStop(1, 'rgba(2, 4, 8, 1)');
+  ctx.fillStyle = grad;
+  ctx.fillRect(0, groundY, W, H - groundY);
+
+  // Subtle ground line
+  ctx.beginPath();
+  ctx.moveTo(0, groundY);
+
+  for (let x = 0; x <= W; x += 3) {
+    const wobble = Math.sin(x * 0.01 + t * 0.001) * 2;
+    ctx.lineTo(x, groundY + wobble);
+  }
+
+  ctx.strokeStyle = 'rgba(80, 160, 120, 0.08)';
+  ctx.lineWidth = 1;
+  ctx.stroke();
+}
+
+// Voice indicators
+function drawVoices(t) {
+  voices.forEach((v, i) => {
+    if (!v.alive) return;
+    const age = (t - v.birth) / 1000;
+    const pulse = 0.5 + 0.5 * Math.sin(age * 3 + i);
+    const r = 4 + pulse * 3;
+
+    ctx.beginPath();
+    ctx.arc(v.x, v.y, r, 0, Math.PI * 2);
+    ctx.fillStyle = `hsla(${v.hue}, 70%, 60%, ${0.4 + pulse * 0.3})`;
+    ctx.fill();
+
+    // Glow ring
+    ctx.beginPath();
+    ctx.arc(v.x, v.y, r + 6 + pulse * 4, 0, Math.PI * 2);
+    ctx.strokeStyle = `hsla(${v.hue}, 60%, 50%, ${0.15 + pulse * 0.1})`;
+    ctx.lineWidth = 1;
+    ctx.stroke();
+
+    // Label
+    ctx.fillStyle = `hsla(${v.hue}, 50%, 60%, 0.4)`;
+    ctx.font = '9px Courier New';
+    ctx.fillText(`${v.waveform} ${Math.round(v.freq)}Hz`, v.x + 12, v.y + 3);
+  });
+}
+
+// --- Main loop ---
+let lastTime = 0;
+function animate(t) {
+  requestAnimationFrame(animate);
+
+  // Fade background (creates trails)
+  ctx.fillStyle = 'rgba(2, 4, 8, 0.15)';
+  ctx.fillRect(0, 0, W, H);
+
+  drawStars(t);
+  drawAurora(t);
+  drawReflection(t);
+  drawVoices(t);
+
+  // Update info
+  if (voices.length > 0) {
+    const activeVoices = voices.filter(v => v.alive);
+    info.textContent = `voices: ${activeVoices.length}/${MAX_VOICES}  |  [space] clear`;
+  } else {
+    info.textContent = '';
+  }
+
+  lastTime = t;
+}
+
+requestAnimationFrame(animate);
+</script>
+</body>
+</html>
