@@ -1,0 +1,406 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Cosmic Aquarium</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { width: 100%; height: 100%; overflow: hidden; background: #000; }
+  canvas { display: block; }
+  #label {
+    position: fixed; bottom: 16px; right: 20px;
+    font-family: 'Courier New', monospace; font-size: 11px;
+    color: rgba(140, 180, 210, 0.35); letter-spacing: 1.5px;
+    pointer-events: none; user-select: none;
+  }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="label">claude_playground &mdash; a moment of calm</div>
+<script>
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
+
+let W, H;
+function resize() {
+  W = canvas.width = window.innerWidth;
+  H = canvas.height = window.innerHeight;
+}
+resize();
+window.addEventListener('resize', resize);
+
+// --- Interaction state ---
+let mouse = { x: -9999, y: -9999, down: false, dragging: false };
+let clickPulses = []; // { x, y, t, strength }
+
+canvas.addEventListener('mousedown', e => {
+  mouse.down = true;
+  mouse.dragging = false;
+  mouse.x = e.clientX;
+  mouse.y = e.clientY;
+  clickPulses.push({ x: e.clientX, y: e.clientY, t: 0, strength: 1 });
+});
+canvas.addEventListener('mousemove', e => {
+  if (mouse.down) mouse.dragging = true;
+  mouse.x = e.clientX;
+  mouse.y = e.clientY;
+});
+canvas.addEventListener('mouseup', () => { mouse.down = false; });
+canvas.addEventListener('mouseleave', () => { mouse.down = false; mouse.x = -9999; });
+
+canvas.addEventListener('touchstart', e => {
+  e.preventDefault();
+  const t = e.touches[0];
+  mouse.down = true; mouse.dragging = false;
+  mouse.x = t.clientX; mouse.y = t.clientY;
+  clickPulses.push({ x: t.clientX, y: t.clientY, t: 0, strength: 1 });
+}, { passive: false });
+canvas.addEventListener('touchmove', e => {
+  e.preventDefault();
+  const t = e.touches[0];
+  mouse.dragging = true;
+  mouse.x = t.clientX; mouse.y = t.clientY;
+}, { passive: false });
+canvas.addEventListener('touchend', () => { mouse.down = false; });
+
+// --- Color palettes for bioluminescence ---
+const palettes = [
+  { r: 120, g: 60, b: 220 },   // deep purple
+  { r: 40, g: 200, b: 200 },   // teal
+  { r: 200, g: 50, b: 160 },   // magenta
+  { r: 220, g: 170, b: 50 },   // warm gold
+  { r: 60, g: 140, b: 255 },   // ocean blue
+  { r: 180, g: 80, b: 255 },   // violet
+  { r: 80, g: 220, b: 160 },   // seafoam
+  { r: 255, g: 100, b: 80 },   // coral
+];
+
+// --- Plankton / ambient particles ---
+class Plankton {
+  constructor() { this.reset(true); }
+  reset(init) {
+    this.x = Math.random() * W;
+    this.y = init ? Math.random() * H : -5;
+    this.size = Math.random() * 1.8 + 0.3;
+    this.speed = Math.random() * 0.15 + 0.05;
+    this.drift = (Math.random() - 0.5) * 0.3;
+    this.alpha = Math.random() * 0.4 + 0.1;
+    this.phase = Math.random() * Math.PI * 2;
+    this.twinkleSpeed = Math.random() * 0.02 + 0.005;
+  }
+  update(time) {
+    this.y += this.speed;
+    this.x += this.drift + Math.sin(time * 0.0005 + this.phase) * 0.15;
+    if (this.y > H + 10 || this.x < -10 || this.x > W + 10) this.reset(false);
+  }
+  draw(time) {
+    const twinkle = 0.5 + 0.5 * Math.sin(time * this.twinkleSpeed + this.phase);
+    const a = this.alpha * twinkle;
+    ctx.beginPath();
+    ctx.arc(this.x, this.y, this.size, 0, Math.PI * 2);
+    ctx.fillStyle = `rgba(180, 220, 255, ${a})`;
+    ctx.fill();
+  }
+}
+
+// --- Jellyfish creature ---
+class Jellyfish {
+  constructor() {
+    const pal = palettes[Math.floor(Math.random() * palettes.length)];
+    this.color = { ...pal };
+    this.x = Math.random() * W;
+    this.y = Math.random() * H;
+    this.vx = (Math.random() - 0.5) * 0.3;
+    this.vy = (Math.random() - 0.5) * 0.2 - 0.15;
+    this.size = Math.random() * 18 + 14;
+    this.phase = Math.random() * Math.PI * 2;
+    this.pulseSpeed = Math.random() * 0.008 + 0.006;
+    this.wobbleSpeed = Math.random() * 0.003 + 0.002;
+    this.tentacleCount = Math.floor(Math.random() * 4) + 5;
+    this.tentacleLength = this.size * (Math.random() * 1.5 + 2);
+    this.tentaclePhases = [];
+    for (let i = 0; i < this.tentacleCount; i++) {
+      this.tentaclePhases.push(Math.random() * Math.PI * 2);
+    }
+    this.trail = [];
+    this.maxTrail = 25;
+    this.glowIntensity = Math.random() * 0.3 + 0.5;
+  }
+
+  update(time) {
+    // Gentle autonomous drift
+    this.vx += (Math.random() - 0.5) * 0.01;
+    this.vy += (Math.random() - 0.5) * 0.01 - 0.002;
+    this.vx *= 0.995;
+    this.vy *= 0.995;
+
+    // Click pulse repulsion
+    for (const p of clickPulses) {
+      const dx = this.x - p.x;
+      const dy = this.y - p.y;
+      const dist = Math.sqrt(dx * dx + dy * dy);
+      const radius = p.t * 8;
+      if (dist < radius + 120 && dist > radius - 30 && p.t < 60) {
+        const force = (1 - p.t / 60) * 1.5 / Math.max(dist, 50);
+        this.vx += dx * force;
+        this.vy += dy * force;
+      }
+    }
+
+    // Hold+drag light attraction
+    if (mouse.down && mouse.dragging) {
+      const dx = mouse.x - this.x;
+      const dy = mouse.y - this.y;
+      const dist = Math.sqrt(dx * dx + dy * dy);
+      if (dist < 350) {
+        const force = 0.15 / Math.max(dist, 40);
+        this.vx += dx * force;
+        this.vy += dy * force;
+      }
+    }
+
+    // Speed limit
+    const speed = Math.sqrt(this.vx * this.vx + this.vy * this.vy);
+    if (speed > 2) {
+      this.vx = (this.vx / speed) * 2;
+      this.vy = (this.vy / speed) * 2;
+    }
+
+    this.x += this.vx;
+    this.y += this.vy;
+
+    // Wrap around edges with padding
+    const pad = 60;
+    if (this.x < -pad) this.x = W + pad;
+    if (this.x > W + pad) this.x = -pad;
+    if (this.y < -pad) this.y = H + pad;
+    if (this.y > H + pad) this.y = -pad;
+
+    // Trail
+    this.trail.push({ x: this.x, y: this.y + this.size * 0.5, a: 1 });
+    if (this.trail.length > this.maxTrail) this.trail.shift();
+    for (const t of this.trail) t.a *= 0.92;
+  }
+
+  draw(time) {
+    const pulse = 0.5 + 0.5 * Math.sin(time * this.pulseSpeed + this.phase);
+    const wobble = Math.sin(time * this.wobbleSpeed + this.phase) * 0.1;
+    const { r, g, b } = this.color;
+    const glow = this.glowIntensity * (0.6 + pulse * 0.4);
+
+    // Draw trail
+    for (let i = 0; i < this.trail.length; i++) {
+      const t = this.trail[i];
+      if (t.a < 0.02) continue;
+      const trailSize = 2 + (i / this.trail.length) * 3;
+      ctx.beginPath();
+      ctx.arc(t.x, t.y, trailSize, 0, Math.PI * 2);
+      ctx.fillStyle = `rgba(${r}, ${g}, ${b}, ${t.a * 0.15})`;
+      ctx.fill();
+    }
+
+    ctx.save();
+    ctx.translate(this.x, this.y);
+    ctx.rotate(wobble);
+
+    // Outer glow
+    const glowRadius = this.size * (2.5 + pulse * 0.8);
+    const outerGlow = ctx.createRadialGradient(0, 0, this.size * 0.3, 0, 0, glowRadius);
+    outerGlow.addColorStop(0, `rgba(${r}, ${g}, ${b}, ${glow * 0.25})`);
+    outerGlow.addColorStop(0.5, `rgba(${r}, ${g}, ${b}, ${glow * 0.08})`);
+    outerGlow.addColorStop(1, `rgba(${r}, ${g}, ${b}, 0)`);
+    ctx.beginPath();
+    ctx.arc(0, 0, glowRadius, 0, Math.PI * 2);
+    ctx.fillStyle = outerGlow;
+    ctx.fill();
+
+    // Bell (dome)
+    const bellH = this.size * (0.7 + pulse * 0.15);
+    const bellW = this.size * (0.9 + pulse * 0.1);
+    ctx.beginPath();
+    ctx.ellipse(0, -bellH * 0.2, bellW, bellH, 0, Math.PI, 0);
+    const bellGrad = ctx.createRadialGradient(0, -bellH * 0.3, 0, 0, -bellH * 0.2, bellH);
+    bellGrad.addColorStop(0, `rgba(${Math.min(r + 80, 255)}, ${Math.min(g + 80, 255)}, ${Math.min(b + 80, 255)}, ${glow * 0.9})`);
+    bellGrad.addColorStop(0.5, `rgba(${r}, ${g}, ${b}, ${glow * 0.6})`);
+    bellGrad.addColorStop(1, `rgba(${r}, ${g}, ${b}, ${glow * 0.15})`);
+    ctx.fillStyle = bellGrad;
+    ctx.fill();
+
+    // Inner bell highlight
+    ctx.beginPath();
+    ctx.ellipse(0, -bellH * 0.35, bellW * 0.5, bellH * 0.5, 0, Math.PI, 0);
+    ctx.fillStyle = `rgba(${Math.min(r + 120, 255)}, ${Math.min(g + 120, 255)}, ${Math.min(b + 120, 255)}, ${glow * 0.3})`;
+    ctx.fill();
+
+    // Bell rim / skirt
+    ctx.beginPath();
+    const rimY = 0;
+    const segments = 20;
+    ctx.moveTo(-bellW, rimY);
+    for (let i = 0; i <= segments; i++) {
+      const t2 = i / segments;
+      const sx = -bellW + t2 * bellW * 2;
+      const sy = rimY + Math.sin(t2 * Math.PI * 4 + time * 0.004 + this.phase) * 2;
+      ctx.lineTo(sx, sy);
+    }
+    ctx.strokeStyle = `rgba(${Math.min(r + 60, 255)}, ${Math.min(g + 60, 255)}, ${Math.min(b + 60, 255)}, ${glow * 0.5})`;
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
+
+    // Tentacles
+    for (let i = 0; i < this.tentacleCount; i++) {
+      const spread = (i / (this.tentacleCount - 1)) * 2 - 1; // -1 to 1
+      const startX = spread * bellW * 0.85;
+      const startY = rimY + 2;
+      const tPhase = this.tentaclePhases[i];
+      const tLen = this.tentacleLength * (0.7 + 0.3 * Math.abs(spread < 0.3 ? 1 : 1 - Math.abs(spread)));
+
+      ctx.beginPath();
+      ctx.moveTo(startX, startY);
+
+      const segs = 12;
+      for (let j = 1; j <= segs; j++) {
+        const frac = j / segs;
+        const waveMajor = Math.sin(time * 0.003 + tPhase + frac * 3) * (8 + frac * 12);
+        const waveMinor = Math.sin(time * 0.007 + tPhase * 2 + frac * 5) * (3 + frac * 5);
+        const tx = startX + spread * frac * 6 + waveMajor + waveMinor;
+        const ty = startY + frac * tLen + Math.sin(time * 0.002 + tPhase + frac * 2) * 3;
+        ctx.lineTo(tx, ty);
+      }
+
+      const tentAlpha = glow * (0.15 + 0.25 * (1 - Math.abs(spread)));
+      ctx.strokeStyle = `rgba(${r}, ${g}, ${b}, ${tentAlpha})`;
+      ctx.lineWidth = 1.2 - Math.abs(spread) * 0.3;
+      ctx.stroke();
+
+      // Tiny glowing dots along tentacles
+      for (let j = 2; j <= segs; j += 3) {
+        const frac = j / segs;
+        const waveMajor = Math.sin(time * 0.003 + tPhase + frac * 3) * (8 + frac * 12);
+        const waveMinor = Math.sin(time * 0.007 + tPhase * 2 + frac * 5) * (3 + frac * 5);
+        const tx = startX + spread * frac * 6 + waveMajor + waveMinor;
+        const ty = startY + frac * tLen + Math.sin(time * 0.002 + tPhase + frac * 2) * 3;
+        const dotPulse = 0.5 + 0.5 * Math.sin(time * 0.01 + tPhase + j);
+        ctx.beginPath();
+        ctx.arc(tx, ty, 1.2 + dotPulse, 0, Math.PI * 2);
+        ctx.fillStyle = `rgba(${Math.min(r + 100, 255)}, ${Math.min(g + 100, 255)}, ${Math.min(b + 100, 255)}, ${tentAlpha * dotPulse * 1.5})`;
+        ctx.fill();
+      }
+    }
+
+    ctx.restore();
+  }
+}
+
+// --- Light source effect when dragging ---
+function drawLightSource(time) {
+  if (!mouse.down || !mouse.dragging) return;
+  const pulse = 0.5 + 0.5 * Math.sin(time * 0.008);
+  const radius = 80 + pulse * 30;
+  const grad = ctx.createRadialGradient(mouse.x, mouse.y, 0, mouse.x, mouse.y, radius);
+  grad.addColorStop(0, `rgba(200, 230, 255, ${0.12 + pulse * 0.06})`);
+  grad.addColorStop(0.4, `rgba(140, 200, 255, ${0.05 + pulse * 0.03})`);
+  grad.addColorStop(1, 'rgba(100, 180, 255, 0)');
+  ctx.beginPath();
+  ctx.arc(mouse.x, mouse.y, radius, 0, Math.PI * 2);
+  ctx.fillStyle = grad;
+  ctx.fill();
+}
+
+// --- Click pulse ripple ---
+function drawClickPulses() {
+  for (let i = clickPulses.length - 1; i >= 0; i--) {
+    const p = clickPulses[i];
+    p.t++;
+    if (p.t > 80) { clickPulses.splice(i, 1); continue; }
+    const progress = p.t / 80;
+    const radius = p.t * 5;
+    const alpha = (1 - progress) * 0.15;
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, radius, 0, Math.PI * 2);
+    ctx.strokeStyle = `rgba(150, 200, 255, ${alpha})`;
+    ctx.lineWidth = 1.5 * (1 - progress);
+    ctx.stroke();
+  }
+}
+
+// --- Deep sea fog/depth layers ---
+function drawBackground(time) {
+  // Base gradient
+  const bg = ctx.createLinearGradient(0, 0, 0, H);
+  bg.addColorStop(0, '#020810');
+  bg.addColorStop(0.3, '#030d1a');
+  bg.addColorStop(0.6, '#041220');
+  bg.addColorStop(1, '#010508');
+  ctx.fillStyle = bg;
+  ctx.fillRect(0, 0, W, H);
+
+  // Subtle animated depth fog layers
+  for (let i = 0; i < 3; i++) {
+    const fogY = H * (0.3 + i * 0.2) + Math.sin(time * 0.0003 + i * 2) * 30;
+    const fogGrad = ctx.createLinearGradient(0, fogY - 80, 0, fogY + 80);
+    fogGrad.addColorStop(0, 'rgba(10, 30, 60, 0)');
+    fogGrad.addColorStop(0.5, `rgba(10, 30, 60, ${0.04 + Math.sin(time * 0.0005 + i) * 0.015})`);
+    fogGrad.addColorStop(1, 'rgba(10, 30, 60, 0)');
+    ctx.fillStyle = fogGrad;
+    ctx.fillRect(0, fogY - 80, W, 160);
+  }
+
+  // Subtle caustic-like light pattern at the top
+  const causticAlpha = 0.012 + Math.sin(time * 0.0004) * 0.005;
+  for (let i = 0; i < 5; i++) {
+    const cx = W * (0.15 + i * 0.18) + Math.sin(time * 0.0002 + i * 1.5) * 50;
+    const cy = 60 + Math.cos(time * 0.0003 + i) * 20;
+    const cr = 100 + Math.sin(time * 0.0004 + i * 0.7) * 30;
+    const cGrad = ctx.createRadialGradient(cx, cy, 0, cx, cy, cr);
+    cGrad.addColorStop(0, `rgba(60, 120, 180, ${causticAlpha})`);
+    cGrad.addColorStop(1, 'rgba(60, 120, 180, 0)');
+    ctx.beginPath();
+    ctx.arc(cx, cy, cr, 0, Math.PI * 2);
+    ctx.fillStyle = cGrad;
+    ctx.fill();
+  }
+}
+
+// --- Initialize entities ---
+const jellyfishCount = Math.min(Math.max(Math.floor((window.innerWidth * window.innerHeight) / 80000), 6), 18);
+const planktonCount = Math.min(Math.max(Math.floor((window.innerWidth * window.innerHeight) / 4000), 80), 300);
+
+const jellyfish = [];
+for (let i = 0; i < jellyfishCount; i++) jellyfish.push(new Jellyfish());
+
+const plankton = [];
+for (let i = 0; i < planktonCount; i++) plankton.push(new Plankton());
+
+// --- Main loop ---
+function animate(time) {
+  drawBackground(time);
+
+  // Update and draw plankton
+  for (const p of plankton) {
+    p.update(time);
+    p.draw(time);
+  }
+
+  // Click pulse ripples
+  drawClickPulses();
+
+  // Light source
+  drawLightSource(time);
+
+  // Update and draw jellyfish (sorted by size for depth)
+  jellyfish.sort((a, b) => a.size - b.size);
+  for (const j of jellyfish) {
+    j.update(time);
+    j.draw(time);
+  }
+
+  requestAnimationFrame(animate);
+}
+
+requestAnimationFrame(animate);
+</script>
+</body>
+</html>
