@@ -1,0 +1,289 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Particle Symphony</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { width: 100%; height: 100%; overflow: hidden; background: #06050a; }
+  canvas { display: block; }
+  #label {
+    position: fixed; bottom: 16px; right: 20px;
+    font-family: 'Courier New', monospace; font-size: 11px;
+    color: rgba(150, 140, 180, 0.35); letter-spacing: 1.5px;
+    pointer-events: none; user-select: none;
+  }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="label">claude_playground &mdash; flowing with the rhythm</div>
+<script>
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
+
+let W, H;
+function resize() {
+  W = canvas.width = window.innerWidth;
+  H = canvas.height = window.innerHeight;
+}
+resize();
+window.addEventListener('resize', resize);
+
+// --- Trail canvas (persistent, fades slowly) ---
+const trailCanvas = document.createElement('canvas');
+const tctx = trailCanvas.getContext('2d');
+function resizeTrail() {
+  trailCanvas.width = W;
+  trailCanvas.height = H;
+}
+resizeTrail();
+window.addEventListener('resize', resizeTrail);
+
+// --- Interaction ---
+let mouse = { x: -9999, y: -9999, down: false };
+canvas.addEventListener('mousedown', e => { mouse.down = true; mouse.x = e.clientX; mouse.y = e.clientY; spawnBurst(e.clientX, e.clientY, 40); });
+canvas.addEventListener('mousemove', e => { mouse.x = e.clientX; mouse.y = e.clientY; });
+canvas.addEventListener('mouseup', () => { mouse.down = false; });
+canvas.addEventListener('mouseleave', () => { mouse.down = false; });
+canvas.addEventListener('touchstart', e => { e.preventDefault(); const t = e.touches[0]; mouse.down = true; mouse.x = t.clientX; mouse.y = t.clientY; spawnBurst(t.clientX, t.clientY, 40); }, { passive: false });
+canvas.addEventListener('touchmove', e => { e.preventDefault(); const t = e.touches[0]; mouse.x = t.clientX; mouse.y = t.clientY; }, { passive: false });
+canvas.addEventListener('touchend', () => { mouse.down = false; });
+
+// --- Color palette ---
+// Cool blues/purples -> warm oranges, driven by particle age and beat
+function particleColor(life, maxLife, beat) {
+  const t = 1 - life / maxLife; // 0 = fresh, 1 = dying
+  // Shift hue from cool to warm as particle ages
+  // beat shifts the palette slightly
+  const beatShift = beat * 20;
+
+  let r, g, b;
+  if (t < 0.3) {
+    // Cool blue-purple
+    const s = t / 0.3;
+    r = 40 + s * 30 + beatShift;
+    g = 60 + s * 20;
+    b = 180 + s * 40 - beatShift * 0.5;
+  } else if (t < 0.6) {
+    // Transition to magenta/pink
+    const s = (t - 0.3) / 0.3;
+    r = 70 + s * 120 + beatShift;
+    g = 80 - s * 30;
+    b = 220 - s * 100;
+  } else {
+    // Warm orange/amber
+    const s = (t - 0.6) / 0.4;
+    r = 190 + s * 50 + beatShift * 0.5;
+    g = 50 + s * 80;
+    b = 120 - s * 90;
+  }
+
+  return {
+    r: Math.min(255, Math.max(0, r | 0)),
+    g: Math.min(255, Math.max(0, g | 0)),
+    b: Math.min(255, Math.max(0, b | 0)),
+  };
+}
+
+// --- Particle ---
+const particles = [];
+const maxParticles = 3000;
+
+class Particle {
+  constructor(x, y, isBurst) {
+    this.x = x;
+    this.y = y;
+    this.maxLife = 150 + Math.random() * 200;
+    this.life = this.maxLife;
+
+    // Wave parameters for organic motion
+    this.baseVx = (Math.random() - 0.5) * 1.5;
+    this.baseVy = (Math.random() - 0.5) * 1.5;
+    this.waveAmpX = Math.random() * 1.5 + 0.3;
+    this.waveAmpY = Math.random() * 1.5 + 0.3;
+    this.waveFreqX = Math.random() * 0.03 + 0.01;
+    this.waveFreqY = Math.random() * 0.03 + 0.01;
+    this.wavePhaseX = Math.random() * Math.PI * 2;
+    this.wavePhaseY = Math.random() * Math.PI * 2;
+
+    this.size = Math.random() * 2 + 1;
+
+    if (isBurst) {
+      const angle = Math.random() * Math.PI * 2;
+      const speed = Math.random() * 2.5 + 0.5;
+      this.baseVx = Math.cos(angle) * speed;
+      this.baseVy = Math.sin(angle) * speed;
+      this.waveAmpX *= 0.5;
+      this.waveAmpY *= 0.5;
+    }
+  }
+
+  update(time, beat) {
+    this.life--;
+
+    // Sine/cosine wave motion
+    const vx = this.baseVx + Math.sin(time * this.waveFreqX + this.wavePhaseX) * this.waveAmpX;
+    const vy = this.baseVy + Math.cos(time * this.waveFreqY + this.wavePhaseY) * this.waveAmpY;
+
+    // Beat affects velocity slightly
+    const beatPush = 1 + beat * 0.15;
+    this.x += vx * beatPush;
+    this.y += vy * beatPush;
+
+    // Slow drift deceleration
+    this.baseVx *= 0.999;
+    this.baseVy *= 0.999;
+
+    return this.life > 0;
+  }
+
+  draw(beat) {
+    const alpha = (this.life / this.maxLife);
+    const { r, g, b } = particleColor(this.life, this.maxLife, beat);
+    const size = this.size * (0.5 + alpha * 0.5);
+
+    // Draw to trail canvas for persistence
+    tctx.beginPath();
+    tctx.arc(this.x, this.y, size * 0.8, 0, Math.PI * 2);
+    tctx.fillStyle = `rgba(${r}, ${g}, ${b}, ${alpha * 0.4})`;
+    tctx.fill();
+
+    // Draw to main canvas with glow
+    const glowSize = size * (3 + beat * 1.5);
+    const grad = ctx.createRadialGradient(this.x, this.y, 0, this.x, this.y, glowSize);
+    grad.addColorStop(0, `rgba(${Math.min(255, r + 50)}, ${Math.min(255, g + 50)}, ${Math.min(255, b + 50)}, ${alpha * 0.7})`);
+    grad.addColorStop(0.4, `rgba(${r}, ${g}, ${b}, ${alpha * 0.2})`);
+    grad.addColorStop(1, `rgba(${r}, ${g}, ${b}, 0)`);
+    ctx.beginPath();
+    ctx.arc(this.x, this.y, glowSize, 0, Math.PI * 2);
+    ctx.fillStyle = grad;
+    ctx.fill();
+
+    // Bright core
+    ctx.beginPath();
+    ctx.arc(this.x, this.y, size * 0.6, 0, Math.PI * 2);
+    ctx.fillStyle = `rgba(${Math.min(255, r + 80)}, ${Math.min(255, g + 80)}, ${Math.min(255, b + 60)}, ${alpha * 0.9})`;
+    ctx.fill();
+  }
+}
+
+// --- Spawn helpers ---
+function spawnFromEdge(beat) {
+  if (particles.length >= maxParticles) return;
+  const edge = Math.floor(Math.random() * 4);
+  let x, y;
+  switch (edge) {
+    case 0: x = Math.random() * W; y = -5; break;
+    case 1: x = W + 5; y = Math.random() * H; break;
+    case 2: x = Math.random() * W; y = H + 5; break;
+    case 3: x = -5; y = Math.random() * H; break;
+  }
+  // Aim generally toward center with randomness
+  const p = new Particle(x, y, false);
+  const toCenterX = (W / 2 - x) / W;
+  const toCenterY = (H / 2 - y) / H;
+  p.baseVx = toCenterX * (1 + Math.random()) + (Math.random() - 0.5) * 0.5;
+  p.baseVy = toCenterY * (1 + Math.random()) + (Math.random() - 0.5) * 0.5;
+  particles.push(p);
+}
+
+function spawnBurst(x, y, count) {
+  for (let i = 0; i < count && particles.length < maxParticles; i++) {
+    particles.push(new Particle(x, y, true));
+  }
+}
+
+function spawnStream(x, y) {
+  for (let i = 0; i < 3 && particles.length < maxParticles; i++) {
+    const p = new Particle(
+      x + (Math.random() - 0.5) * 10,
+      y + (Math.random() - 0.5) * 10,
+      true
+    );
+    p.baseVx *= 0.4;
+    p.baseVy *= 0.4;
+    p.maxLife = 100 + Math.random() * 150;
+    p.life = p.maxLife;
+    particles.push(p);
+  }
+}
+
+// --- Background ---
+function drawBackground() {
+  const bg = ctx.createRadialGradient(W / 2, H / 2, 0, W / 2, H / 2, Math.max(W, H) * 0.7);
+  bg.addColorStop(0, '#0a0812');
+  bg.addColorStop(0.5, '#08060e');
+  bg.addColorStop(1, '#04030a');
+  ctx.fillStyle = bg;
+  ctx.fillRect(0, 0, W, H);
+}
+
+// --- Beat system (pseudo audio-reactive) ---
+function getBeat(time) {
+  // Layered sine waves simulating a rhythmic pulse
+  const beat1 = Math.sin(time * 0.001) * 0.5 + 0.5;       // slow breath
+  const beat2 = Math.sin(time * 0.003) * 0.3 + 0.3;       // medium pulse
+  const beat3 = Math.sin(time * 0.007) * 0.2 + 0.2;       // fast shimmer
+  const accent = Math.pow(Math.sin(time * 0.0015), 8) * 0.5; // occasional accent
+  return Math.min(1, beat1 * 0.4 + beat2 * 0.3 + beat3 * 0.2 + accent);
+}
+
+// --- Main loop ---
+let frameCount = 0;
+
+function animate(time) {
+  const beat = getBeat(time);
+
+  // Background
+  drawBackground();
+
+  // Fade trail canvas
+  tctx.fillStyle = `rgba(4, 3, 10, ${0.02 + beat * 0.01})`;
+  tctx.fillRect(0, 0, W, H);
+
+  // Draw trail layer
+  ctx.globalAlpha = 0.8;
+  ctx.drawImage(trailCanvas, 0, 0);
+  ctx.globalAlpha = 1;
+
+  // Spawn edge particles — rate varies with beat
+  frameCount++;
+  const spawnRate = Math.max(1, Math.floor(4 - beat * 2));
+  if (frameCount % spawnRate === 0) {
+    const count = 1 + Math.floor(beat * 2);
+    for (let i = 0; i < count; i++) spawnFromEdge(beat);
+  }
+
+  // Mouse stream
+  if (mouse.down) spawnStream(mouse.x, mouse.y);
+
+  // Update and draw particles
+  for (let i = particles.length - 1; i >= 0; i--) {
+    if (!particles[i].update(time, beat)) {
+      particles.splice(i, 1);
+    } else {
+      particles[i].draw(beat);
+    }
+  }
+
+  // Beat visualization — subtle central pulse
+  const pulseAlpha = beat * 0.04;
+  const pulseR = 80 + beat * 120;
+  const cGrad = ctx.createRadialGradient(W / 2, H / 2, 0, W / 2, H / 2, pulseR);
+  cGrad.addColorStop(0, `rgba(100, 80, 160, ${pulseAlpha})`);
+  cGrad.addColorStop(0.5, `rgba(80, 60, 140, ${pulseAlpha * 0.3})`);
+  cGrad.addColorStop(1, 'rgba(60, 40, 120, 0)');
+  ctx.beginPath();
+  ctx.arc(W / 2, H / 2, pulseR, 0, Math.PI * 2);
+  ctx.fillStyle = cGrad;
+  ctx.fill();
+
+  requestAnimationFrame(animate);
+}
+
+requestAnimationFrame(animate);
+</script>
+</body>
+</html>
